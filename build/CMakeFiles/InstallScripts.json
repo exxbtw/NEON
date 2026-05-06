@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/user/Desktop/NEON/build/cmake_install.cmake",
+		"/Users/user/Desktop/NEON/build/third_party/glfw/cmake_install.cmake",
+		"/Users/user/Desktop/NEON/build/third_party/glfw/src/cmake_install.cmake",
+		"/Users/user/Desktop/NEON/build/third_party/glfw/docs/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
