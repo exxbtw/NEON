@@ -6,6 +6,8 @@
 #include <cassert>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <cmath>
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -73,7 +75,6 @@ int64_t process_array_neon(const int32_t* data, size_t n) {
     }
 
     int64x2_t acc = vaddq_s64(acc0, acc1);
-    // vaddvq_s64 может отсутствовать на RPi3 — используем надёжный вариант
     sum = vgetq_lane_s64(acc, 0) + vgetq_lane_s64(acc, 1);
 
     for (; i < n; ++i) {
@@ -115,6 +116,7 @@ struct AppState {
     // Параметры
     int arraySize = 4 * 1024 * 1024;
     int iters = 100;
+    int plot_points = 50;  // дефолт побольше
 
     // Результаты
     bool ran = false;
@@ -187,7 +189,7 @@ int main() {
     ImGuiIO& io = ImGui::GetIO();
 
     io.Fonts->AddFontFromFileTTF(
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf", // macOS
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
         18.0f,
         NULL,
         io.Fonts->GetGlyphRangesCyrillic()
@@ -278,37 +280,48 @@ int main() {
             }
         }
 
+        ImGui::Separator();
+
+        // ── Параметры графика — отдельно, чтобы слайдер точно применялся ──
+        ImGui::Text("Параметры графика:");
+        ImGui::SetNextItemWidth(300);
+        ImGui::SliderInt("Точек графика", &state.plot_points, 5, 200);
         ImGui::SameLine();
+        ImGui::TextDisabled("(сейчас: %d)", state.plot_points);
 
         if (ImGui::Button("Построить график")) {
+            state.addLog("Строим Log-Log график: " + std::to_string(state.plot_points) + " точек...");
+
             state.plot_sizes.clear();
             state.plot_scalar.clear();
             state.plot_neon.clear();
 
-            std::vector<int> sizes = {
-                256 * 1024,
-                512 * 1024,
-                1 * 1024 * 1024,
-                2 * 1024 * 1024,
-                4 * 1024 * 1024,
-                8 * 1024 * 1024
-            };
+            // 1. Фиксируем диапазон: от 1 000 до текущего выбранного размера
+            double min_sz_log = std::log10(100.0); 
+            double max_sz_log = std::log10((double)state.arraySize);
+            
+            for (int i = 0; i < state.plot_points; ++i) {
+                float t = (state.plot_points > 1) ? (float)i / (state.plot_points - 1) : 0.0f;
+                
+                // Генерируем размер экспоненциально (логарифмический шаг)
+                double p = min_sz_log + t * (max_sz_log - min_sz_log);
+                int sz = (int)std::pow(10.0, p);
+                
+                // Выравнивание для NEON (кратно 4)
+                sz = (sz / 4) * 4;
+                if (sz < 4) sz = 4;
 
-            for (int sz : sizes) {
                 int32_t* data = (int32_t*)aligned_alloc(16, sz * sizeof(int32_t));
                 if (!data) continue;
 
-                for (int i = 0; i < sz; ++i) {
-                    int r = rand() % 3;
-                    if      (r == 0) data[i] = 0;
-                    else if (r == 1) data[i] = rand() % 100000 + 1;
-                    else             data[i] = -(rand() % 100000) - 1;
-                }
+                // Заполняем мусором
+                for (int j = 0; j < sz; ++j) data[j] = (rand() % 200) - 100;
 
-                double t_scalar = bench(process_array_scalar, data, sz, 50);
-                double t_neon   = bench(process_array_neon,   data, sz, 50);
+                // Замеряем (уменьшил итерации до 20, чтобы не ждать вечность)
+                double t_scalar = bench(process_array_scalar, data, sz, 20);
+                double t_neon   = bench(process_array_neon,   data, sz, 20);
 
-                state.plot_sizes.push_back((float)sz / (1024 * 1024));
+                state.plot_sizes.push_back((float)sz / (1024.0f * 1024.0f));
                 state.plot_scalar.push_back((float)t_scalar);
                 state.plot_neon.push_back((float)t_neon);
 
@@ -316,9 +329,9 @@ int main() {
             }
 
             state.plot_ready = true;
+            state.addLog("Готово! Теперь на графике есть и 1k, и 10k, и 1M.");
         }
-
-        // ── Результаты ──
+        // ── Результаты бенчмарка ──
         if (state.ran) {
             ImGui::Separator();
             ImGui::Text("Результаты:");
@@ -356,29 +369,178 @@ int main() {
                 ImGui::TextColored(ImVec4(1.0f,0.2f,0.2f,1.0f), "НЕСООТВЕТСТВИЕ РЕЗУЛЬТАТА!");
         }
 
-        if (state.plot_ready) {
+        // ── График ──
+        if (state.plot_ready && !state.plot_scalar.empty()) {
             ImGui::Separator();
-            ImGui::Text("График: время vs размер массива (мс)");
+            ImGui::Text("График: время vs количество элементов (логарифмическая шкала X) — %d точек",
+                (int)state.plot_sizes.size());
 
             float max_scalar = *std::max_element(state.plot_scalar.begin(), state.plot_scalar.end());
             float max_neon   = *std::max_element(state.plot_neon.begin(), state.plot_neon.end());
-            float max_val = std::max(max_scalar, max_neon);
+            float max_val = std::max(max_scalar, max_neon) * 1.1f;
 
-            ImGui::PlotLines("Scalar",
-                state.plot_scalar.data(),
-                state.plot_scalar.size(),
-                0, NULL, 0.0f, max_val, ImVec2(0,120));
+            float min_x = state.plot_sizes.front() * 1024.0f * 1024.0f;
+            float max_x = state.plot_sizes.back()  * 1024.0f * 1024.0f;
 
-            ImGui::PlotLines("NEON",
-                state.plot_neon.data(),
-                state.plot_neon.size(),
-                0, NULL, 0.0f, max_val, ImVec2(0,120));
+            float log_min_x = std::log10(min_x);
+            float log_max_x = std::log10(max_x);
 
-            ImGui::Text("Размеры (MB):");
-            for (float s : state.plot_sizes) {
-                ImGui::SameLine();
-                ImGui::Text("%.1f", s);
+            ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
+            ImVec2 canvas_size = ImVec2(ImGui::GetContentRegionAvail().x, 320);
+            if (canvas_size.x < 50.0f) canvas_size.x = 50.0f;
+
+            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+            draw_list->AddRectFilled(
+                canvas_pos,
+                ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y),
+                IM_COL32(30, 30, 30, 255)
+            );
+            draw_list->AddRect(
+                canvas_pos,
+                ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y),
+                IM_COL32(255, 255, 255, 255)
+            );
+
+            const float pad_left   = 60.0f;
+            const float pad_bottom = 40.0f;
+            const float pad_top    = 20.0f;
+            const float pad_right  = 20.0f;
+
+            float graph_x0 = canvas_pos.x + pad_left;
+            float graph_y0 = canvas_pos.y + pad_top;
+            float graph_x1 = canvas_pos.x + canvas_size.x - pad_right;
+            float graph_y1 = canvas_pos.y + canvas_size.y - pad_bottom;
+            float graph_w  = graph_x1 - graph_x0;
+            float graph_h  = graph_y1 - graph_y0;
+
+            // Сетка
+            for (int i = 0; i <= 10; ++i) {
+                float t = (float)i / 10.0f;
+                draw_list->AddLine(
+                    ImVec2(graph_x0 + t * graph_w, graph_y0),
+                    ImVec2(graph_x0 + t * graph_w, graph_y1),
+                    IM_COL32(70, 70, 70, 120));
+                draw_list->AddLine(
+                    ImVec2(graph_x0, graph_y0 + t * graph_h),
+                    ImVec2(graph_x1, graph_y0 + t * graph_h),
+                    IM_COL32(70, 70, 70, 120));
             }
+
+            // Оси
+            draw_list->AddLine(ImVec2(graph_x0, graph_y1), ImVec2(graph_x1, graph_y1),
+                IM_COL32(255,255,255,255), 2.0f);
+            draw_list->AddLine(ImVec2(graph_x0, graph_y0), ImVec2(graph_x0, graph_y1),
+                IM_COL32(255,255,255,255), 2.0f);
+
+            // Подписи осей
+            draw_list->AddText(ImVec2(graph_x1 - 140, graph_y1 + 10),
+                IM_COL32(255,255,255,255), "Количество элементов (log scale)");
+            draw_list->AddText(ImVec2(graph_x0 - 45, graph_y0 - 5),
+                IM_COL32(255,255,255,255), "ms");
+
+            // Y-разметка
+            for (int i = 0; i <= 10; ++i) {
+                float t = (float)i / 10.0f;
+                float value = max_val * (1.0f - t);
+                float y = graph_y0 + t * graph_h;
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%.1f", value);
+                draw_list->AddText(ImVec2(graph_x0 - 50, y - 7),
+                    IM_COL32(200,200,200,255), buf);
+            }
+
+            // X-разметка (логарифмическая шкала)
+            std::vector<int> x_labels;
+
+            int min_pow = (int)std::floor(std::log10(min_x));
+
+            int max_pow = (int)std::ceil(std::log10(max_x));
+
+            for (int p = min_pow; p <= max_pow; ++p) {
+
+                x_labels.push_back((int)std::pow(10.0f, (float)p));
+
+            }
+
+            for (int value : x_labels) {
+                if (value < min_x || value > max_x)
+                    continue;
+
+                float t = (std::log10((float)value) - log_min_x)
+                    / (log_max_x - log_min_x);
+
+                float x = graph_x0 + t * graph_w;
+
+                draw_list->AddLine(
+                    ImVec2(x, graph_y0),
+                    ImVec2(x, graph_y1),
+                    IM_COL32(120, 120, 120, 160),
+                    1.0f
+                );
+
+                char buf[32];
+                if (value >= 1000000)
+                    snprintf(buf, sizeof(buf), "%.1fM", value / 1000000.0f);
+                else
+                    snprintf(buf, sizeof(buf), "%dK", value / 1000);
+
+                draw_list->AddText(
+                    ImVec2(x - 14, graph_y1 + 5),
+                    IM_COL32(220,220,220,255),
+                    buf
+                );
+            }
+
+            // Кривые
+            auto draw_curve = [&](const std::vector<float>& values, ImU32 color) {
+                size_t n = values.size();
+                if (n < 2) return;
+
+                // кружки только когда точек немного
+                float dot_r = (n <= 30) ? 3.5f : (n <= 60) ? 2.0f : 0.0f;
+
+                for (size_t i = 0; i + 1 < n; ++i) {
+                    float elems0 = state.plot_sizes[i] * 1024.0f * 1024.0f;
+                    float elems1 = state.plot_sizes[i + 1] * 1024.0f * 1024.0f;
+
+                    float t0 = (std::log10(elems0) - log_min_x)
+                        / (log_max_x - log_min_x);
+                    float t1 = (std::log10(elems1) - log_min_x)
+                        / (log_max_x - log_min_x);
+
+                    float x0 = graph_x0 + t0 * graph_w;
+                    float x1 = graph_x0 + t1 * graph_w;
+                    float y0 = graph_y1 - (values[i]     / max_val) * graph_h;
+                    float y1 = graph_y1 - (values[i + 1] / max_val) * graph_h;
+
+                    draw_list->AddLine(ImVec2(x0, y0), ImVec2(x1, y1), color, 2.0f);
+
+                    if (dot_r > 0.0f)
+                        draw_list->AddCircleFilled(ImVec2(x0, y0), dot_r, color);
+                }
+
+                // последняя точка
+                if (dot_r > 0.0f) {
+                    float elems = state.plot_sizes.back() * 1024.0f * 1024.0f;
+                    float t = (std::log10(elems) - log_min_x)
+                        / (log_max_x - log_min_x);
+                    float x = graph_x0 + t * graph_w;
+                    float y = graph_y1 - (values.back() / max_val) * graph_h;
+                    draw_list->AddCircleFilled(ImVec2(x, y), dot_r, color);
+                }
+            };
+
+            draw_curve(state.plot_scalar, IM_COL32(255, 100, 100, 255)); // красный
+            draw_curve(state.plot_neon,   IM_COL32(100, 255, 120, 255)); // зелёный
+
+            // Легенда
+            draw_list->AddCircleFilled(ImVec2(graph_x0 + 20, graph_y0 + 15), 5.0f, IM_COL32(255,100,100,255));
+            draw_list->AddText(ImVec2(graph_x0 + 32, graph_y0 + 8), IM_COL32(255,255,255,255), "Scalar");
+            draw_list->AddCircleFilled(ImVec2(graph_x0 + 120, graph_y0 + 15), 5.0f, IM_COL32(100,255,120,255));
+            draw_list->AddText(ImVec2(graph_x0 + 132, graph_y0 + 8), IM_COL32(255,255,255,255), "NEON");
+
+            ImGui::Dummy(canvas_size);
         }
 
         // ── Лог ──
