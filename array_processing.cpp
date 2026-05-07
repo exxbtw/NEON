@@ -197,12 +197,7 @@ int main() {
 
     ImGuiIO& io = ImGui::GetIO();
 
-    io.Fonts->AddFontFromFileTTF(
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        18.0f,
-        NULL,
-        io.Fonts->GetGlyphRangesCyrillic()
-    );
+
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
