@@ -35,6 +35,7 @@ int64_t process_array_scalar(const int32_t* data, size_t n) {
 }
 
 // ─── NEON версия ───
+// ─── NEON версия (ИСПРАВЛЕННАЯ) ───
 int64_t process_array_neon(const int32_t* data, size_t n) {
     int64_t sum = 0;
     int64x2_t acc0 = vdupq_n_s64(0);
@@ -52,13 +53,17 @@ int64_t process_array_neon(const int32_t* data, size_t n) {
         int32x4_t abs0  = vsubq_s32(veorq_s32(vec0, sign0), sign0);
         int32x4_t abs1  = vsubq_s32(veorq_s32(vec1, sign1), sign1);
 
-        int32x4_t mask_pos0 = vcgtq_s32(vec0, zero);
-        int32x4_t mask_neg0 = vcltq_s32(vec0, zero);
-        int32x4_t mask_pos1 = vcgtq_s32(vec1, zero);
-        int32x4_t mask_neg1 = vcltq_s32(vec1, zero);
+        // Исправление: используем uint32x4_t для масок
+        uint32x4_t mask_pos0 = vcgtq_s32(vec0, zero);
+        uint32x4_t mask_neg0 = vcltq_s32(vec0, zero);
+        uint32x4_t mask_pos1 = vcgtq_s32(vec1, zero);
+        uint32x4_t mask_neg1 = vcltq_s32(vec1, zero);
 
-        int32x4_t contrib0 = vorrq_s32(vandq_s32(vec0, mask_pos0), vandq_s32(abs0, mask_neg0));
-        int32x4_t contrib1 = vorrq_s32(vandq_s32(vec1, mask_pos1), vandq_s32(abs1, mask_neg1));
+        // Исправление: приводим маски к int32x4_t через vreinterpretq_s32_u32
+        int32x4_t contrib0 = vorrq_s32(vandq_s32(vec0, vreinterpretq_s32_u32(mask_pos0)), 
+                                       vandq_s32(abs0, vreinterpretq_s32_u32(mask_neg0)));
+        int32x4_t contrib1 = vorrq_s32(vandq_s32(vec1, vreinterpretq_s32_u32(mask_pos1)), 
+                                       vandq_s32(abs1, vreinterpretq_s32_u32(mask_neg1)));
 
         acc0 = vaddq_s64(acc0, vpaddlq_s32(contrib0));
         acc1 = vaddq_s64(acc1, vpaddlq_s32(contrib1));
@@ -68,9 +73,13 @@ int64_t process_array_neon(const int32_t* data, size_t n) {
         int32x4_t vec     = vld1q_s32(data + i);
         int32x4_t sign    = vshrq_n_s32(vec, 31);
         int32x4_t abs_val = vsubq_s32(veorq_s32(vec, sign), sign);
-        int32x4_t mask_pos = vcgtq_s32(vec, zero);
-        int32x4_t mask_neg = vcltq_s32(vec, zero);
-        int32x4_t contrib  = vorrq_s32(vandq_s32(vec, mask_pos), vandq_s32(abs_val, mask_neg));
+        
+        // Исправление здесь тоже
+        uint32x4_t mask_pos = vcgtq_s32(vec, zero);
+        uint32x4_t mask_neg = vcltq_s32(vec, zero);
+        int32x4_t contrib  = vorrq_s32(vandq_s32(vec, vreinterpretq_s32_u32(mask_pos)), 
+                                       vandq_s32(abs_val, vreinterpretq_s32_u32(mask_neg)));
+        
         acc0 = vaddq_s64(acc0, vpaddlq_s32(contrib));
     }
 
@@ -483,7 +492,7 @@ int main() {
                 if (value >= 1000000)
                     snprintf(buf, sizeof(buf), "%.1fM", value / 1000000.0f);
                 else
-                    snprintf(buf, sizeof(buf), "%dK", value / 1000);
+                    snprintf(buf, sizeof(buf), "%d", value);
 
                 draw_list->AddText(
                     ImVec2(x - 14, graph_y1 + 5),
